@@ -93,7 +93,9 @@ pub fn temp_dir() -> &'static PathBuf {
 pub fn logs_dir() -> &'static PathBuf {
     static LOGS_DIR: OnceLock<PathBuf> = OnceLock::new();
     LOGS_DIR.get_or_init(|| {
-        if cfg!(target_os = "macos") {
+        if let Ok(override_path) = std::env::var("ZED_LOGS_DIR") {
+            override_path.into()
+        } else if cfg!(target_os = "macos") {
             home_dir().join("Library/Logs/Zed")
         } else {
             support_dir().join("logs")

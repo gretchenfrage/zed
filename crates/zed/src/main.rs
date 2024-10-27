@@ -24,7 +24,7 @@ use gpui::{
 };
 use http_client::{read_proxy_from_env, Uri};
 use language::LanguageRegistry;
-use log::LevelFilter;
+use log::{Level, LevelFilter, Log};
 use reqwest_client::ReqwestClient;
 
 use assets::Assets;
@@ -37,15 +37,10 @@ use session::{AppSession, Session};
 use settings::{
     handle_settings_file_changes, watch_config_file, InvalidSettingsError, Settings, SettingsStore,
 };
-use simplelog::ConfigBuilder;
+use simplelog::{ConfigBuilder, WriteLogger};
 use smol::process::Command;
 use std::{
-    env,
-    fs::OpenOptions,
-    io::{IsTerminal, Write},
-    path::{Path, PathBuf},
-    process,
-    sync::Arc,
+    backtrace::Backtrace, env, fs::{File, OpenOptions}, io::{IsTerminal, Write}, path::{Path, PathBuf}, process, sync::Arc
 };
 use theme::{ActiveTheme, SystemAppearance, ThemeRegistry, ThemeSettings};
 use time::UtcOffset;
@@ -168,7 +163,7 @@ fn main() {
     {
         if env::var("ZED_STATELESS").is_err() {
             if crate::zed::listen_for_cli_connections(open_listener.clone()).is_err() {
-                println!("zed is already running");
+                println!("Zed is already running");
                 return;
             }
         }
@@ -178,7 +173,7 @@ fn main() {
     {
         use zed::windows_only_instance::*;
         if !check_single_instance() {
-            println!("zed is already running");
+            println!("Zed is already running");
             return;
         }
     }
@@ -187,7 +182,7 @@ fn main() {
     {
         use zed::mac_only_instance::*;
         if ensure_only_instance() != IsOnlyInstance::Yes {
-            println!("zed is already running");
+            println!("Zed is already running");
             return;
         }
     }
@@ -903,6 +898,8 @@ fn init_logger() {
     if stdout_is_a_pty() {
         init_stdout_logger();
     } else {
+        println!("Logging to: {}", paths::log_file().display());
+
         let level = LevelFilter::Info;
 
         // Prevent log file from becoming too large.
@@ -937,7 +934,39 @@ fn init_logger() {
                 }
 
                 let config = config_builder.build();
-                simplelog::WriteLogger::init(level, config, log_file)
+
+                struct MyLogger {
+                    inner: WriteLogger<Arc<File>>,
+                    lock: Mutex<()>,
+                    file: Arc<File>,
+                }
+
+                impl Log for MyLogger {
+                    fn enabled(&self, metadata: &log::Metadata) -> bool {
+                        self.inner.enabled(metadata)
+                    }
+
+                    fn log(&self, record: &log::Record) {
+                        let guard = self.lock.lock();
+                        self.inner.log(record);
+                        if record.level() <= Level::Warn {
+                            let _ = writeln!(&*self.file, "{}", Backtrace::force_capture());
+                        }
+                        drop(guard);
+                    }
+
+                    fn flush(&self) {
+                        let _ = (&*self.file).flush();
+                    }
+                }
+
+                let log_file = Arc::new(log_file);
+                log::set_max_level(level);
+                log::set_boxed_logger(Box::new(MyLogger {
+                    inner: *WriteLogger::new(level, config, Arc::clone(&log_file)),
+                    lock: Mutex::new(()),
+                    file: log_file,
+                }))
                     .expect("could not initialize logger");
             }
             Err(err) => {
