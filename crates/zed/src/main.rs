@@ -7,11 +7,13 @@ mod reliability;
 mod zed;
 
 use anyhow::{anyhow, Context as _, Result};
+use assistant_slash_command::SlashCommandRegistry;
 use chrono::Offset;
 use clap::{command, Parser};
 use cli::FORCE_CLI_MODE_ENV_VAR_NAME;
 use client::{parse_zed_link, Client, ProxySettings, UserStore};
 use collab_ui::channel_view::ChannelView;
+use context_servers::ContextServerFactoryRegistry;
 use db::kvp::{GLOBAL_KEY_VALUE_STORE, KEY_VALUE_STORE};
 use editor::Editor;
 use env_logger::Builder;
@@ -23,6 +25,7 @@ use gpui::{
     VisualContext,
 };
 use http_client::{read_proxy_from_env, Uri};
+use indexed_docs::IndexedDocsRegistry;
 use language::LanguageRegistry;
 use log::{Level, LevelFilter, Log};
 use reqwest_client::ReqwestClient;
@@ -32,13 +35,14 @@ use node_runtime::{NodeBinaryOptions, NodeRuntime};
 use parking_lot::Mutex;
 use project::project_settings::ProjectSettings;
 use recent_projects::{open_ssh_project, SshSettings};
-use release_channel::{AppCommitSha, AppVersion};
+use release_channel::{AppCommitSha, AppVersion, ReleaseChannel};
 use session::{AppSession, Session};
 use settings::{
     handle_settings_file_changes, watch_config_file, InvalidSettingsError, Settings, SettingsStore,
 };
 use simplelog::{ConfigBuilder, WriteLogger};
 use smol::process::Command;
+use snippet_provider::SnippetRegistry;
 use std::{
     backtrace::Backtrace, env, fs::{File, OpenOptions}, io::{IsTerminal, Write}, path::{Path, PathBuf}, process, sync::Arc
 };
@@ -159,32 +163,29 @@ fn main() {
 
     let (open_listener, mut open_rx) = OpenListener::new();
 
-    #[cfg(target_os = "linux")]
-    {
-        if env::var("ZED_STATELESS").is_err() {
-            if crate::zed::listen_for_cli_connections(open_listener.clone()).is_err() {
-                println!("Zed is already running");
-                return;
+    let failed_single_instance_check =
+        if *db::ZED_STATELESS || *release_channel::RELEASE_CHANNEL == ReleaseChannel::Dev {
+            false
+        } else {
+            #[cfg(target_os = "linux")]
+            {
+                crate::zed::listen_for_cli_connections(open_listener.clone()).is_err()
             }
-        }
-    }
 
-    #[cfg(target_os = "windows")]
-    {
-        use zed::windows_only_instance::*;
-        if !check_single_instance() {
-            println!("Zed is already running");
-            return;
-        }
-    }
+            #[cfg(target_os = "windows")]
+            {
+                !crate::zed::windows_only_instance::check_single_instance()
+            }
 
-    #[cfg(target_os = "macos")]
-    {
-        use zed::mac_only_instance::*;
-        if ensure_only_instance() != IsOnlyInstance::Yes {
-            println!("Zed is already running");
-            return;
-        }
+            #[cfg(target_os = "macos")]
+            {
+                use zed::mac_only_instance::*;
+                ensure_only_instance() != IsOnlyInstance::Yes
+            }
+        };
+    if failed_single_instance_check {
+        println!("Zed is already running");
+        return;
     }
 
     let git_hosting_provider_registry = Arc::new(GitHostingProviderRegistry::new());
@@ -327,7 +328,7 @@ fn main() {
         telemetry.start(
             system_id.as_ref().map(|id| id.to_string()),
             installation_id.as_ref().map(|id| id.to_string()),
-            session_id,
+            session_id.clone(),
             cx,
         );
 
@@ -363,7 +364,9 @@ fn main() {
         auto_update::init(client.http_client(), cx);
         reliability::init(
             client.http_client(),
+            system_id.as_ref().map(|id| id.to_string()),
             installation_id.clone().map(|id| id.to_string()),
+            session_id.clone(),
             cx,
         );
 
@@ -398,12 +401,20 @@ fn main() {
             app_state.client.telemetry().clone(),
             cx,
         );
-        extension::init(
+        let api = extensions_ui::ConcreteExtensionRegistrationHooks::new(
+            ThemeRegistry::global(cx),
+            SlashCommandRegistry::global(cx),
+            IndexedDocsRegistry::global(cx),
+            SnippetRegistry::global(cx),
+            app_state.languages.clone(),
+            ContextServerFactoryRegistry::global(cx),
+            cx,
+        );
+        extension_host::init(
+            api,
             app_state.fs.clone(),
             app_state.client.clone(),
             app_state.node_runtime.clone(),
-            app_state.languages.clone(),
-            ThemeRegistry::global(cx),
             cx,
         );
         recent_projects::init(cx);
@@ -416,6 +427,7 @@ fn main() {
         app_state.languages.set_theme(cx.theme().clone());
         editor::init(cx);
         image_viewer::init(cx);
+        repl::notebook::init(cx);
         diagnostics::init(cx);
 
         audio::init(Assets, cx);
@@ -436,6 +448,7 @@ fn main() {
         terminal_view::init(cx);
         journal::init(app_state.clone(), cx);
         language_selector::init(cx);
+        toolchain_selector::init(cx);
         theme_selector::init(cx);
         language_tools::init(cx);
         call::init(app_state.client.clone(), app_state.user_store.clone(), cx);

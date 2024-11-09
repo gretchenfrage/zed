@@ -46,6 +46,7 @@ use std::{
     future::Future,
     iter::{self, Iterator, Peekable},
     mem,
+    num::NonZeroU32,
     ops::{Deref, DerefMut, Range},
     path::{Path, PathBuf},
     str,
@@ -4103,6 +4104,10 @@ impl<'a> BufferChunks<'a> {
                 diagnostic_endpoints
                     .sort_unstable_by_key(|endpoint| (endpoint.offset, !endpoint.is_start));
                 *diagnostics = diagnostic_endpoints.into_iter().peekable();
+                self.hint_depth = 0;
+                self.error_depth = 0;
+                self.warning_depth = 0;
+                self.information_depth = 0;
             }
         }
     }
@@ -4320,6 +4325,13 @@ impl IndentSize {
             }
         }
         self
+    }
+
+    pub fn len_with_expanded_tabs(&self, tab_size: NonZeroU32) -> usize {
+        match self.kind {
+            IndentKind::Space => self.len as usize,
+            IndentKind::Tab => self.len as usize * tab_size.get() as usize,
+        }
     }
 }
 
